@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Buscador de revistas en español — CRAI</title>
+<style>
+  :root {
+    --color-primario: #6d1a36; /* ajusta a los colores institucionales del CRAI-UAO */
+    --color-primario-suave: #f4e6ea;
+    --color-texto: #232323;
+    --color-borde: #ddd;
+    --color-fondo: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 1.5rem 1rem 3rem;
+    color: var(--color-texto);
+    background: var(--color-fondo);
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 0.2rem; }
+  .subtitulo { color: #666; font-size: 0.92rem; margin-bottom: 1.2rem; }
+  textarea {
+    width: 100%;
+    min-height: 110px;
+    padding: 0.7rem;
+    border: 1px solid var(--color-borde);
+    border-radius: 8px;
+    font-size: 0.95rem;
+    font-family: inherit;
+    resize: vertical;
+  }
+  .controles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: center;
+    margin: 0.8rem 0 1.2rem;
+    font-size: 0.9rem;
+  }
+  .controles label { display: flex; align-items: center; gap: 0.35rem; cursor: pointer; }
+  button#buscar {
+    background: var(--color-primario);
+    color: white;
+    border: none;
+    padding: 0.65rem 1.4rem;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  button#buscar:hover { opacity: 0.92; }
+  button#buscar:disabled { opacity: 0.5; cursor: not-allowed; }
+  #estado { font-size: 0.88rem; color: #666; margin-bottom: 1rem; }
+  .resultado {
+    border: 1px solid var(--color-borde);
+    border-left: 4px solid var(--color-primario);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    margin-bottom: 0.8rem;
+    background: #fafafa;
+  }
+  .resultado h3 { margin: 0 0 0.3rem; font-size: 1.02rem; }
+  .resultado .meta { font-size: 0.85rem; color: #555; line-height: 1.5; }
+  .resultado .enlaces { margin-top: 0.5rem; font-size: 0.88rem; }
+  .resultado .enlaces a {
+    color: var(--color-primario);
+    text-decoration: none;
+    margin-right: 1rem;
+    font-weight: 600;
+  }
+  .resultado .enlaces a:hover { text-decoration: underline; }
+  .badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: var(--color-primario-suave);
+    color: var(--color-primario);
+    margin-right: 0.3rem;
+  }
+  footer { margin-top: 2rem; font-size: 0.78rem; color: #888; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --color-texto: #eaeaea;
+      --color-fondo: #1a1a1a;
+      --color-borde: #444;
+      --color-primario-suave: #3a2530;
+    }
+    :root:not([data-theme="light"]) .resultado { background: #222; }
+  }
+  :root[data-theme="dark"] {
+    --color-texto: #eaeaea;
+    --color-fondo: #1a1a1a;
+    --color-borde: #444;
+    --color-primario-suave: #3a2530;
+  }
+</style>
+</head>
+<body>
+
+<h1>📚 Buscador de revistas académicas en español</h1>
+<p class="subtitulo">CRAI-UAO — pega el resumen o las palabras clave de tu artículo y encuentra revistas en español afines, con enlace directo a sus requisitos de publicación.</p>
+
+<textarea id="consulta" placeholder="Ej: Este estudio analiza el impacto de la gamificación en la motivación de estudiantes de educación media..."></textarea>
+
+<div class="controles">
+  <label><input type="checkbox" id="soloOA"> Solo acceso abierto</label>
+  <label><input type="checkbox" id="sinAPC"> Excluir revistas con cargo por publicación (APC)</label>
+  <label>Resultados:
+    <select id="topN">
+      <option value="5">5</option>
+      <option value="10" selected>10</option>
+      <option value="20">20</option>
+    </select>
+  </label>
+  <button id="buscar">Buscar revistas afines</button>
+</div>
+
+<div id="estado">Cargando catálogo de revistas...</div>
+<div id="resultados"></div>
+
+<footer>
+  Fuentes: DOAJ (doaj.org) y OpenAlex (openalex.org). El orden se calcula por
+  similitud de palabras clave, no es garantía de aceptación editorial: verifica
+  siempre el alcance y las políticas de cada revista antes de enviar un manuscrito.
+</footer>
+
+<script>
+/* =========================================================================
+   Buscador de revistas — coincidencia TF-IDF simplificada, 100% en el navegador.
+   No requiere backend: solo necesita que revistas.json esté en la misma carpeta
+   (o que se ajuste RUTA_JSON más abajo a donde lo publique el CRAI).
+   ========================================================================= */
+
+const RUTA_JSON = "revistas.json";
+
+let revistas = [];
+let vocabulario = new Map();   // término -> índice
+let idf = [];                   // idf por término
+let vectoresRevistas = [];      // vector TF-IDF por revista (Map término_idx -> valor)
+
+function tokenizar(texto) {
+  return (texto || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita tildes
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(t => t.length > 2);
+}
+
+function construirIndice(lista) {
+  const docsTokens = lista.map(r => tokenizar(r.texto_busqueda || (r.titulo + " " + r.materias)));
+
+  // vocabulario + document frequency
+  const df = new Map();
+  docsTokens.forEach(tokens => {
+    const vistos = new Set(tokens);
+    vistos.forEach(t => df.set(t, (df.get(t) || 0) + 1));
+  });
+
+  vocabulario = new Map();
+  idf = [];
+  let idx = 0;
+  const N = docsTokens.length;
+  df.forEach((freq, termino) => {
+    vocabulario.set(termino, idx);
+    idf[idx] = Math.log((N + 1) / (freq + 1)) + 1; // idf suavizado
+    idx++;
+  });
+
+  vectoresRevistas = docsTokens.map(tokens => vectorTFIDF(tokens));
+}
+
+function vectorTFIDF(tokens) {
+  const tf = new Map();
+  tokens.forEach(t => tf.set(t, (tf.get(t) || 0) + 1));
+  const vec = new Map();
+  let norma = 0;
+  tf.forEach((frecuencia, termino) => {
+    const idxTerm = vocabulario.get(termino);
+    if (idxTerm === undefined) return; // término fuera de vocabulario (consulta con palabras nuevas)
+    const valor = frecuencia * idf[idxTerm];
+    vec.set(idxTerm, valor);
+    norma += valor * valor;
+  });
+  norma = Math.sqrt(norma) || 1;
+  vec.forEach((v, k) => vec.set(k, v / norma));
+  return vec;
+}
+
+function similitudCoseno(vecA, vecB) {
+  // recorre el vector más pequeño para eficiencia
+  const [chico, grande] = vecA.size < vecB.size ? [vecA, vecB] : [vecB, vecA];
+  let acumulado = 0;
+  chico.forEach((valor, idx) => {
+    if (grande.has(idx)) acumulado += valor * grande.get(idx);
+  });
+  return acumulado;
+}
+
+async function cargarDatos() {
+  const estado = document.getElementById("estado");
+  try {
+    const resp = await fetch(RUTA_JSON);
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    revistas = await resp.json();
+    construirIndice(revistas);
+    estado.textContent = `Catálogo cargado: ${revistas.length} revistas en español.`;
+    document.getElementById("buscar").disabled = false;
+  } catch (err) {
+    estado.textContent = "No se pudo cargar revistas.json. Verifica que esté en la misma carpeta que esta página.";
+    console.error(err);
+  }
+}
+
+function buscar() {
+  const consultaTexto = document.getElementById("consulta").value.trim();
+  const contenedor = document.getElementById("resultados");
+  contenedor.innerHTML = "";
+  if (!consultaTexto) return;
+
+  const soloOA = document.getElementById("soloOA").checked;
+  const sinAPC = document.getElementById("sinAPC").checked;
+  const topN = parseInt(document.getElementById("topN").value, 10);
+
+  const vecConsulta = vectorTFIDF(tokenizar(consultaTexto));
+
+  const puntuados = revistas
+    .map((r, i) => ({ revista: r, score: similitudCoseno(vecConsulta, vectoresRevistas[i]) }))
+    .filter(x => x.score > 0)
+    .filter(x => !soloOA || x.revista.acceso_abierto)
+    .filter(x => !sinAPC || x.revista.cobra_apc !== true)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topN);
+
+  if (puntuados.length === 0) {
+    contenedor.innerHTML = "<p>No se encontraron revistas afines. Intenta con otras palabras clave.</p>";
+    return;
+  }
+
+  puntuados.forEach(({ revista, score }) => {
+    const div = document.createElement("div");
+    div.className = "resultado";
+    const apcTxt = revista.cobra_apc === true ? "Cobra APC" : (revista.cobra_apc === false ? "No cobra APC" : "APC desconocido");
+    div.innerHTML = `
+      <h3>${escapeHTML(revista.titulo)}</h3>
+      <div class="meta">
+        <span class="badge">similitud ${score.toFixed(2)}</span>
+        <span class="badge">${revista.acceso_abierto ? "Acceso abierto" : "No acceso abierto"}</span>
+        <span class="badge">${apcTxt}</span><br>
+        ISSN: ${escapeHTML(revista.issn)} · Editorial: ${escapeHTML(revista.editorial)} · País: ${escapeHTML(revista.pais)}<br>
+        Materias: ${escapeHTML(revista.materias)}
+      </div>
+      <div class="enlaces">
+        ${revista.url_home ? `<a href="${escapeAttr(revista.url_home)}" target="_blank" rel="noopener">Ir al sitio de la revista</a>` : ""}
+        ${revista.url_requisitos && revista.url_requisitos !== revista.url_home ? `<a href="${escapeAttr(revista.url_requisitos)}" target="_blank" rel="noopener">Requisitos de publicación</a>` : ""}
+      </div>
+    `;
+    contenedor.appendChild(div);
+  });
+}
+
+function escapeHTML(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function escapeAttr(s) { return escapeHTML(s); }
+
+document.getElementById("buscar").addEventListener("click", buscar);
+document.getElementById("buscar").disabled = true;
+document.getElementById("consulta").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.ctrlKey) buscar();
+});
+
+cargarDatos();
+</script>
+</body>
+</html>
